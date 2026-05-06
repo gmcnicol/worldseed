@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"time"
 )
 
@@ -17,7 +16,7 @@ type CreateInput struct {
 type Snapshot struct {
 	Name             string   `json:"name"`
 	EntropyProfile   string   `json:"entropy_profile"`
-	UniverseAgeTicks int64    `json:"universe_age_ticks"`
+	UniverseAgeTicks string   `json:"universe_age_ticks"`
 	ArchiveIntegrity float64  `json:"archive_integrity"`
 	RecentEvents     []string `json:"recent_events"`
 }
@@ -54,7 +53,7 @@ func appendLog(ctx context.Context, tx *sql.Tx, uid, at, aid, et, vt, payload st
 
 func (s *Service) Snapshot(ctx context.Context, universeID string) (Snapshot, error) {
 	var out Snapshot
-	if err := s.db.QueryRowContext(ctx, `SELECT name, entropy_profile, universe_age_ticks, archive_integrity FROM universes WHERE id=?`, universeID).Scan(&out.Name, &out.EntropyProfile, &out.UniverseAgeTicks, &out.ArchiveIntegrity); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT name, entropy_profile, universe_age_ticks_bigint, archive_integrity FROM universes WHERE id=?`, universeID).Scan(&out.Name, &out.EntropyProfile, &out.UniverseAgeTicks, &out.ArchiveIntegrity); err != nil {
 		return out, err
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT payload_json FROM events WHERE universe_id=? ORDER BY recorded_time DESC LIMIT 6`, universeID)
@@ -109,5 +108,3 @@ func (s *Service) ResolveInterventions(ctx context.Context, universeID string, n
 	}
 	return nil
 }
-
-var _ = fmt.Sprintf

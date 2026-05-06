@@ -15,7 +15,7 @@ import (
 
 type snapshot struct {
 	Name, EntropyProfile string
-	UniverseAgeTicks     int64
+	UniverseAgeTicks     string
 	ArchiveIntegrity     float64
 	RecentEvents         []string
 }
@@ -70,7 +70,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 func (m model) View() string {
 	title := lipgloss.NewStyle().Bold(true).Render("Worldseed Observatory")
-	return fmt.Sprintf("%s\nUniverse: %s\nEntropy Profile: %s\nUptime: %s\nUniverse Age: %d ticks\nArchive Integrity: %.2f\nActive Civilisations: 1\nSignal: awaiting deep-band telemetry\n\nRecent timeline events:\n- %s\n\n[p] preserve archive   [q] disconnect\n", title, m.snap.Name, m.snap.EntropyProfile, time.Since(m.started).Round(time.Second), m.snap.UniverseAgeTicks, m.snap.ArchiveIntegrity, join(m.snap.RecentEvents))
+	return fmt.Sprintf("%s\nUniverse: %s\nEntropy Profile: %s\nUptime: %s\nUniverse Age: %s ticks\nArchive Integrity: %.2f\nActive Civilisations: 1\nSignal: awaiting deep-band telemetry\n\nRecent timeline events:\n- %s\n\n[p] preserve archive   [q] disconnect\n", title, m.snap.Name, m.snap.EntropyProfile, time.Since(m.started).Round(time.Second), m.snap.UniverseAgeTicks, m.snap.ArchiveIntegrity, join(m.snap.RecentEvents))
 }
 func join(v []string) string {
 	if len(v) == 0 {
