@@ -7,7 +7,7 @@ Phase 1 provides:
 - `worldseed universe create <name>` for deterministic universe creation with an opaque universe ID.
 - `worldseedd start --universe <id>` for continuous local simulation.
 - `worldseed connect` for an SSH-backed terminal dashboard.
-- An append-only timeline event log with valid universe time and recorded archive time.
+- An append-only, checksummed timeline event log with valid universe time and recorded archive time.
 - One intervention path: press `p` in the dashboard to request `preserve_archive`; a delayed consequence is emitted after later ticks.
 
 ## Development

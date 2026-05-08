@@ -14,12 +14,14 @@ const (
 )
 
 type Event struct {
-	ID         int64     `json:"id"`
-	UniverseID string    `json:"universe_id"`
-	Kind       string    `json:"kind"`
-	EntityID   string    `json:"entity_id,omitempty"`
-	ValidTime  int64     `json:"valid_time"`
-	RecordedAt time.Time `json:"recorded_at"`
-	Payload    string    `json:"payload"`
-	Summary    string    `json:"summary"`
+	ID               int64     `json:"id"`
+	UniverseID       string    `json:"universe_id"`
+	Kind             string    `json:"kind"`
+	EntityID         string    `json:"entity_id,omitempty"`
+	ValidTime        int64     `json:"valid_time"`
+	RecordedAt       time.Time `json:"recorded_at"`
+	Payload          string    `json:"payload"`
+	Summary          string    `json:"summary"`
+	PreviousChecksum string    `json:"previous_checksum"`
+	Checksum         string    `json:"checksum"`
 }
