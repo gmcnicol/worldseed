@@ -67,3 +67,18 @@ CREATE TABLE IF NOT EXISTS signals (
     payload TEXT NOT NULL,
     FOREIGN KEY (universe_id) REFERENCES universes(id)
 );
+
+CREATE TABLE IF NOT EXISTS client_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    universe_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    remote_addr TEXT NOT NULL,
+    FOREIGN KEY (universe_id) REFERENCES universes(id),
+    UNIQUE (universe_id, fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_client_keys_universe ON client_keys(universe_id, last_seen_at);

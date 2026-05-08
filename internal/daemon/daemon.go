@@ -34,11 +34,12 @@ type StartOptions struct {
 }
 
 type Server struct {
-	opts    StartOptions
-	store   *storage.Store
-	engine  *sim.Engine
-	started time.Time
-	logger  *slog.Logger
+	opts        StartOptions
+	store       *storage.Store
+	engine      *sim.Engine
+	started     time.Time
+	hostKeyPath string
+	logger      *slog.Logger
 }
 
 func Start(ctx context.Context, opts StartOptions) error {
@@ -54,18 +55,23 @@ func Start(ctx context.Context, opts StartOptions) error {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	store, err := storage.Open(universe.DatabasePath(opts.DataDir, opts.UniverseName))
+	dbPath, err := universe.ResolveDatabasePath(ctx, opts.DataDir, opts.UniverseName)
+	if err != nil {
+		return err
+	}
+	store, err := storage.Open(dbPath)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
 	server := &Server{
-		opts:    opts,
-		store:   store,
-		engine:  sim.NewEngine(store),
-		started: time.Now().UTC(),
-		logger:  opts.Logger.With("universe", opts.UniverseName),
+		opts:        opts,
+		store:       store,
+		engine:      sim.NewEngine(store),
+		started:     time.Now().UTC(),
+		hostKeyPath: filepath.Join(filepath.Dir(dbPath), "ssh_host_ed25519"),
+		logger:      opts.Logger.With("universe", opts.UniverseName),
 	}
 	return server.run(ctx)
 }
@@ -73,11 +79,14 @@ func Start(ctx context.Context, opts StartOptions) error {
 func (s *Server) run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	signer, err := loadOrCreateHostSigner(universe.HostKeyPath(s.opts.DataDir, s.opts.UniverseName))
+	signer, err := loadOrCreateHostSigner(s.hostKeyPath)
 	if err != nil {
 		return err
 	}
-	config := &ssh.ServerConfig{NoClientAuth: true, ServerVersion: "SSH-2.0-worldseedd"}
+	config := &ssh.ServerConfig{
+		PublicKeyCallback: acceptClientKey,
+		ServerVersion:     "SSH-2.0-worldseedd",
+	}
 	config.AddHostKey(signer)
 
 	listener, err := net.Listen("tcp", s.opts.Addr)
@@ -159,7 +168,7 @@ func (s *Server) handleConn(conn net.Conn, config *ssh.ServerConfig) {
 		return
 	}
 	defer sshConn.Close()
-	s.logger.Info("ssh client connected", "remote", sshConn.RemoteAddr().String())
+	s.recordClientKey(sshConn)
 	go ssh.DiscardRequests(requests)
 	for channel := range channels {
 		if channel.ChannelType() != "session" {
@@ -211,6 +220,46 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request) {
 			_ = req.Reply(false, nil)
 		}
 	}
+}
+
+func acceptClientKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+	return &ssh.Permissions{
+		Extensions: map[string]string{
+			"username":    conn.User(),
+			"fingerprint": ssh.FingerprintSHA256(key),
+			"public_key":  strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))),
+		},
+	}, nil
+}
+
+func (s *Server) recordClientKey(conn *ssh.ServerConn) {
+	perms := conn.Permissions
+	if perms == nil {
+		s.logger.Warn("ssh client connected without key permissions", "remote", conn.RemoteAddr().String())
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	u, err := s.store.LoadUniverse(ctx)
+	if err != nil {
+		s.logger.Warn("ssh client key association failed", "remote", conn.RemoteAddr().String(), "error", err)
+		return
+	}
+	now := time.Now().UTC()
+	key := storage.ClientKey{
+		UniverseID:  u.ID,
+		Username:    perms.Extensions["username"],
+		Fingerprint: perms.Extensions["fingerprint"],
+		PublicKey:   perms.Extensions["public_key"],
+		FirstSeenAt: now,
+		LastSeenAt:  now,
+		RemoteAddr:  conn.RemoteAddr().String(),
+	}
+	if err := s.store.RecordClientKey(ctx, key); err != nil {
+		s.logger.Warn("ssh client key association failed", "remote", conn.RemoteAddr().String(), "fingerprint", key.Fingerprint, "error", err)
+		return
+	}
+	s.logger.Info("ssh client connected", "remote", conn.RemoteAddr().String(), "fingerprint", key.Fingerprint)
 }
 
 func loadOrCreateHostSigner(path string) (ssh.Signer, error) {

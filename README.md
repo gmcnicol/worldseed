@@ -4,8 +4,8 @@ Worldseed is a local-first, terminal-native universe simulation. Each universe i
 
 Phase 1 provides:
 
-- `worldseed universe create <name>` for deterministic universe creation.
-- `worldseedd start --universe <name>` for continuous local simulation.
+- `worldseed universe create <name>` for deterministic universe creation with an opaque universe ID.
+- `worldseedd start --universe <id>` for continuous local simulation.
 - `worldseed connect` for an SSH-backed terminal dashboard.
 - An append-only timeline event log with valid universe time and recorded archive time.
 - One intervention path: press `p` in the dashboard to request `preserve_archive`; a delayed consequence is emitted after later ticks.
@@ -15,14 +15,14 @@ Phase 1 provides:
 The default data directory follows the Phase 1 storage target:
 
 ```sh
-/var/lib/worldseed/universes/<name>/universe.sqlite
+/var/lib/worldseed/universes/<id>/universe.sqlite
 ```
 
 For local development without root-owned paths, set `WORLDSEED_HOME` or pass `--data-dir`:
 
 ```sh
 worldseed --data-dir ./testdata universe create aurora
-worldseedd --data-dir ./testdata start --universe aurora
+worldseedd --data-dir ./testdata start --universe <id-from-create>
 worldseed connect
 ```
 
