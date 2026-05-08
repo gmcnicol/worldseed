@@ -52,11 +52,19 @@ func TestTicksAreDeterministicAcrossIdenticalUniverses(t *testing.T) {
 		assertSameEvents(t, leftResult.Events, rightResult.Events)
 	}
 
-	leftCivilisations, err := left.AllCivilisations(ctx, "uni_deterministic")
+	leftUniverse, err := left.LoadUniverse(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rightCivilisations, err := right.AllCivilisations(ctx, "uni_deterministic")
+	rightUniverse, err := right.LoadUniverse(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leftCivilisations, err := left.AllCivilisations(ctx, leftUniverse.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rightCivilisations, err := right.AllCivilisations(ctx, rightUniverse.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +103,11 @@ func TestPreserveArchiveHasDelayedConsequence(t *testing.T) {
 		t.Fatalf("expected delayed intervention consequence after due age")
 	}
 
-	pending, err := store.PendingInterventions(ctx, "uni_intervention", 100)
+	u, err := store.LoadUniverse(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.PendingInterventions(ctx, u.ID, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +115,7 @@ func TestPreserveArchiveHasDelayedConsequence(t *testing.T) {
 		t.Fatalf("expected intervention to resolve, got %d pending", len(pending))
 	}
 
-	active, err := store.ActiveCivilisations(ctx, "uni_intervention")
+	active, err := store.ActiveCivilisations(ctx, u.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +133,7 @@ func TestPreserveArchiveHasDelayedConsequence(t *testing.T) {
 
 func createTestStore(t *testing.T, name string, seed int64) *storage.Store {
 	t.Helper()
-	path, err := universe.Create(context.Background(), universe.CreateOptions{
+	created, err := universe.Create(context.Background(), universe.CreateOptions{
 		DataDir: t.TempDir(),
 		Name:    name,
 		Seed:    seed,
@@ -129,7 +141,7 @@ func createTestStore(t *testing.T, name string, seed int64) *storage.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := storage.Open(path)
+	store, err := storage.Open(created.Path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +155,10 @@ func createTestStore(t *testing.T, name string, seed int64) *storage.Store {
 
 func assertSameUniverseProjection(t *testing.T, left, right storage.Universe) {
 	t.Helper()
-	if left.ID != right.ID || left.Name != right.Name || left.Seed != right.Seed || left.Age != right.Age {
+	if left.ID == right.ID {
+		t.Fatalf("expected independently created universes to have distinct IDs, got %s", left.ID)
+	}
+	if left.Name != right.Name || left.Seed != right.Seed || left.Age != right.Age {
 		t.Fatalf("universe identity mismatch: %#v != %#v", left, right)
 	}
 	if left.Entropy != right.Entropy {

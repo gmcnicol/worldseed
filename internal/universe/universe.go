@@ -2,9 +2,11 @@ package universe
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +26,12 @@ type CreateOptions struct {
 	Seed    int64
 }
 
+type CreatedUniverse struct {
+	ID   string
+	Name string
+	Path string
+}
+
 func DataDir(override string) string {
 	if override != "" {
 		return override
@@ -34,16 +42,20 @@ func DataDir(override string) string {
 	return DefaultDataDir
 }
 
-func UniverseDir(dataDir, name string) string {
-	return filepath.Join(DataDir(dataDir), "universes", Slug(name))
+func UniverseDir(dataDir, id string) string {
+	return filepath.Join(DataDir(dataDir), "universes", strings.TrimSpace(id))
 }
 
-func DatabasePath(dataDir, name string) string {
-	return filepath.Join(UniverseDir(dataDir, name), "universe.sqlite")
+func DatabasePath(dataDir, id string) string {
+	return filepath.Join(UniverseDir(dataDir, id), "universe.sqlite")
 }
 
-func HostKeyPath(dataDir, name string) string {
-	return filepath.Join(UniverseDir(dataDir, name), "ssh_host_ed25519")
+func HostKeyPath(dataDir, id string) string {
+	return filepath.Join(UniverseDir(dataDir, id), "ssh_host_ed25519")
+}
+
+func OperatorKeyPath(dataDir string) string {
+	return filepath.Join(DataDir(dataDir), "operator_ed25519")
 }
 
 func SocketLabel(name string) string {
@@ -74,35 +86,43 @@ func SeedFromName(name string) int64 {
 	return int64(h.Sum64() & 0x7fffffffffffffff)
 }
 
-func Create(ctx context.Context, opts CreateOptions) (string, error) {
+func Create(ctx context.Context, opts CreateOptions) (CreatedUniverse, error) {
 	if strings.TrimSpace(opts.Name) == "" {
-		return "", fmt.Errorf("universe name is required")
+		return CreatedUniverse{}, fmt.Errorf("universe name is required")
 	}
 	if Slug(opts.Name) == "" {
-		return "", fmt.Errorf("universe name must contain letters or digits")
+		return CreatedUniverse{}, fmt.Errorf("universe name must contain letters or digits")
 	}
 	seed := opts.Seed
 	if seed == 0 {
 		seed = SeedFromName(opts.Name)
 	}
-	path := DatabasePath(opts.DataDir, opts.Name)
+	universeID, err := NewID(rand.Reader)
+	if err != nil {
+		return CreatedUniverse{}, err
+	}
+	path := DatabasePath(opts.DataDir, universeID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return "", err
+		return CreatedUniverse{}, err
 	}
 	if _, err := os.Stat(path); err == nil {
-		return "", fmt.Errorf("universe %q already exists at %s", opts.Name, path)
+		return CreatedUniverse{}, fmt.Errorf("universe %q already exists at %s", opts.Name, path)
 	} else if !os.IsNotExist(err) {
-		return "", err
+		return CreatedUniverse{}, err
 	}
 	store, err := storage.Open(path)
 	if err != nil {
-		return "", err
+		return CreatedUniverse{}, err
 	}
 	defer store.Close()
 
 	now := time.Now().UTC()
+	civilisationID, err := NewID(rand.Reader)
+	if err != nil {
+		return CreatedUniverse{}, err
+	}
 	u := storage.Universe{
-		ID:               "uni_" + Slug(opts.Name),
+		ID:               universeID,
 		Name:             strings.TrimSpace(opts.Name),
 		Seed:             seed,
 		CreatedAt:        now,
@@ -112,7 +132,7 @@ func Create(ctx context.Context, opts CreateOptions) (string, error) {
 	}
 	state := storage.CivilisationState{Status: "active", Stability: 0.72, Doctrine: 0.28}
 	entity := storage.Entity{
-		ID:         "civ_" + Slug(opts.Name) + "_choir",
+		ID:         civilisationID,
 		UniverseID: u.ID,
 		Kind:       "civilisation",
 		Name:       initialCivilisationName(seed),
@@ -135,9 +155,90 @@ func Create(ctx context.Context, opts CreateOptions) (string, error) {
 		Summary:    fmt.Sprintf("Archive node opened on %s; %s entered the first recorded horizon.", u.Name, entity.Name),
 	}
 	if err := store.CreateUniverse(ctx, u, entity, event); err != nil {
+		return CreatedUniverse{}, err
+	}
+	return CreatedUniverse{ID: u.ID, Name: u.Name, Path: path}, nil
+}
+
+func ResolveDatabasePath(ctx context.Context, dataDir, ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", fmt.Errorf("universe id or name is required")
+	}
+	if isPathSegment(ref) {
+		path := DatabasePath(dataDir, ref)
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+	matches, err := findUniverses(ctx, dataDir, ref)
+	if err != nil {
 		return "", err
 	}
-	return path, nil
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("universe %q not found", ref)
+	case 1:
+		return matches[0].Path, nil
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, match := range matches {
+			ids = append(ids, match.ID)
+		}
+		return "", fmt.Errorf("universe name %q is ambiguous; use one of these ids: %s", ref, strings.Join(ids, ", "))
+	}
+}
+
+func NewID(random io.Reader) (string, error) {
+	var b [16]byte
+	if _, err := io.ReadFull(random, b[:]); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4],
+		b[4:6],
+		b[6:8],
+		b[8:10],
+		b[10:16]), nil
+}
+
+type locatedUniverse struct {
+	ID   string
+	Path string
+}
+
+func findUniverses(ctx context.Context, dataDir, ref string) ([]locatedUniverse, error) {
+	paths, err := filepath.Glob(filepath.Join(DataDir(dataDir), "universes", "*", "universe.sqlite"))
+	if err != nil {
+		return nil, err
+	}
+	var matches []locatedUniverse
+	for _, path := range paths {
+		store, err := storage.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		u, loadErr := store.LoadUniverse(ctx)
+		closeErr := store.Close()
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		if u.ID == ref || u.Name == ref {
+			matches = append(matches, locatedUniverse{ID: u.ID, Path: path})
+		}
+	}
+	return matches, nil
+}
+
+func isPathSegment(ref string) bool {
+	return ref != "." && ref != ".." && ref == filepath.Base(ref)
 }
 
 func initialCivilisationName(seed int64) string {

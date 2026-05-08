@@ -8,7 +8,7 @@ Run locally with a writable data directory:
 
 ```sh
 worldseed --data-dir ./testdata universe create aurora
-worldseedd --data-dir ./testdata start --universe aurora
+worldseedd --data-dir ./testdata start --universe <id-from-create>
 worldseed connect
 ```
 

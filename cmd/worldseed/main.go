@@ -24,7 +24,7 @@ func rootCmd() *cobra.Command {
 		Short: "Maintain local universe archive nodes",
 	}
 	cmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "worldseed data directory")
-	cmd.AddCommand(universeCmd(&dataDir), connectCmd())
+	cmd.AddCommand(universeCmd(&dataDir), connectCmd(&dataDir))
 	return cmd
 }
 
@@ -39,7 +39,7 @@ func universeCmd(dataDir *string) *cobra.Command {
 		Short: "Create a deterministic universe archive",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := universe.Create(cmd.Context(), universe.CreateOptions{
+			created, err := universe.Create(cmd.Context(), universe.CreateOptions{
 				DataDir: *dataDir,
 				Name:    args[0],
 				Seed:    seed,
@@ -47,7 +47,7 @@ func universeCmd(dataDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "created universe %q at %s\n", args[0], path)
+			fmt.Fprintf(cmd.OutOrStdout(), "created universe %q (%s) at %s\n", created.Name, created.ID, created.Path)
 			return nil
 		},
 	}
@@ -56,7 +56,7 @@ func universeCmd(dataDir *string) *cobra.Command {
 	return cmd
 }
 
-func connectCmd() *cobra.Command {
+func connectCmd(dataDir *string) *cobra.Command {
 	var addr string
 	cmd := &cobra.Command{
 		Use:   "connect",
@@ -64,7 +64,7 @@ func connectCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
-			return daemon.Connect(ctx, daemon.ConnectOptions{Addr: addr})
+			return daemon.Connect(ctx, daemon.ConnectOptions{DataDir: *dataDir, Addr: addr})
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:27411", "worldseedd SSH address")

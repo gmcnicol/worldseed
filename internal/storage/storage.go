@@ -59,6 +59,17 @@ type Intervention struct {
 	Payload        string
 }
 
+type ClientKey struct {
+	ID          int64
+	UniverseID  string
+	Username    string
+	Fingerprint string
+	PublicKey   string
+	FirstSeenAt time.Time
+	LastSeenAt  time.Time
+	RemoteAddr  string
+}
+
 type DashboardState struct {
 	Universe            Universe
 	ActiveCivilisations []Entity
@@ -282,6 +293,48 @@ func (s *Store) SignalCount(ctx context.Context, universeID string) (int, error)
 	return count, err
 }
 
+func (s *Store) RecordClientKey(ctx context.Context, key ClientKey) error {
+	if key.FirstSeenAt.IsZero() {
+		key.FirstSeenAt = key.LastSeenAt
+	}
+	if key.LastSeenAt.IsZero() {
+		key.LastSeenAt = key.FirstSeenAt
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO client_keys (universe_id, username, fingerprint, public_key, first_seen_at, last_seen_at, remote_addr)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(universe_id, fingerprint) DO UPDATE SET
+	username = excluded.username,
+	public_key = excluded.public_key,
+	last_seen_at = excluded.last_seen_at,
+	remote_addr = excluded.remote_addr`,
+		key.UniverseID,
+		key.Username,
+		key.Fingerprint,
+		key.PublicKey,
+		key.FirstSeenAt.UTC().Format(time.RFC3339Nano),
+		key.LastSeenAt.UTC().Format(time.RFC3339Nano),
+		key.RemoteAddr)
+	return err
+}
+
+func (s *Store) ClientKeys(ctx context.Context, universeID string) ([]ClientKey, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, universe_id, username, fingerprint, public_key, first_seen_at, last_seen_at, remote_addr FROM client_keys WHERE universe_id = ? ORDER BY last_seen_at DESC, id DESC`, universeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []ClientKey
+	for rows.Next() {
+		key, err := scanClientKey(rows)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
 func EncodeCivilisationState(state CivilisationState) string {
 	body, _ := json.Marshal(state)
 	return string(body)
@@ -355,6 +408,27 @@ func scanIntervention(row interface{ Scan(...any) error }) (Intervention, error)
 	}
 	intervention.RecordedAt = recordedAt
 	return intervention, nil
+}
+
+func scanClientKey(row interface{ Scan(...any) error }) (ClientKey, error) {
+	var key ClientKey
+	var firstSeen string
+	var lastSeen string
+	err := row.Scan(&key.ID, &key.UniverseID, &key.Username, &key.Fingerprint, &key.PublicKey, &firstSeen, &lastSeen, &key.RemoteAddr)
+	if err != nil {
+		return ClientKey{}, err
+	}
+	firstSeenAt, err := time.Parse(time.RFC3339Nano, firstSeen)
+	if err != nil {
+		return ClientKey{}, err
+	}
+	lastSeenAt, err := time.Parse(time.RFC3339Nano, lastSeen)
+	if err != nil {
+		return ClientKey{}, err
+	}
+	key.FirstSeenAt = firstSeenAt
+	key.LastSeenAt = lastSeenAt
+	return key, nil
 }
 
 func insertEntity(ctx context.Context, tx *sql.Tx, entity Entity) error {

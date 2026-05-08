@@ -2,21 +2,27 @@ package daemon
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/gmcnicol/worldseed/internal/universe"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
 
 type ConnectOptions struct {
-	Addr   string
-	Stdin  *os.File
-	Stdout *os.File
-	Stderr io.Writer
+	DataDir string
+	Addr    string
+	Stdin   *os.File
+	Stdout  *os.File
+	Stderr  io.Writer
 }
 
 func Connect(ctx context.Context, opts ConnectOptions) error {
@@ -32,8 +38,13 @@ func Connect(ctx context.Context, opts ConnectOptions) error {
 	if opts.Stderr == nil {
 		opts.Stderr = os.Stderr
 	}
+	signer, err := loadOrCreateClientSigner(universe.OperatorKeyPath(opts.DataDir))
+	if err != nil {
+		return err
+	}
 	config := &ssh.ClientConfig{
 		User:            "operator",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         5 * time.Second,
 	}
@@ -89,4 +100,38 @@ func Connect(ctx context.Context, opts ConnectOptions) error {
 		}
 		return nil
 	}
+}
+
+func loadOrCreateClientSigner(path string) (ssh.Signer, error) {
+	body, err := os.ReadFile(path)
+	if err == nil {
+		return ssh.ParsePrivateKey(body)
+	}
+	if !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, err
+	}
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	block, err := ssh.MarshalPrivateKey(key, "worldseed local operator key")
+	if err != nil {
+		return nil, err
+	}
+	body = pem.EncodeToMemory(block)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		return nil, err
+	}
+	signer, err := ssh.ParsePrivateKey(body)
+	if err != nil {
+		return nil, err
+	}
+	publicKey := ssh.MarshalAuthorizedKey(signer.PublicKey())
+	if err := os.WriteFile(path+".pub", publicKey, 0o644); err != nil {
+		return nil, err
+	}
+	return signer, nil
 }
