@@ -1,0 +1,62 @@
+services:
+  worldseedd:
+    image: golang:1.23-bookworm
+    working_dir: /src
+    init: true
+    attach: false
+    ports:
+      - "27411:27411"
+    environment:
+      WORLDSEED_UNIVERSE_NAME: aurora
+      WORLDSEED_TICK: 5s
+      GOCACHE: /go-cache/build
+      GOMODCACHE: /go-cache/mod
+    volumes:
+      - .:/src
+      - worldseed-data:/data
+      - go-cache:/go-cache
+    command:
+      - /bin/sh
+      - -ceu
+      - |
+        if [ ! -s /data/universe_id ]; then
+          created="$$(go run ./cmd/worldseed --data-dir /data universe create "$${WORLDSEED_UNIVERSE_NAME}")"
+          printf '%s\n' "$${created}"
+          printf '%s\n' "$${created}" | sed -n 's/.*(\([0-9a-f-]\{36\}\)).*/\1/p' > /data/universe_id
+        fi
+
+        universe_id="$$(cat /data/universe_id)"
+        exec go run ./cmd/worldseedd --data-dir /data start \
+          --universe "$${universe_id}" \
+          --addr 0.0.0.0:27411 \
+          --tick "$${WORLDSEED_TICK}"
+
+  worldseed:
+    image: golang:1.23-bookworm
+    working_dir: /src
+    init: true
+    profiles:
+      - play
+    stdin_open: true
+    tty: true
+    depends_on:
+      - worldseedd
+    environment:
+      GOCACHE: /go-cache/build
+      GOMODCACHE: /go-cache/mod
+    volumes:
+      - .:/src
+      - worldseed-data:/data
+      - go-cache:/go-cache
+    command:
+      - /bin/bash
+      - -ceu
+      - |
+        until 2>/dev/null >/dev/tcp/worldseedd/27411; do
+          sleep 1
+        done
+        exec go run ./cmd/worldseed --data-dir /data connect --addr worldseedd:27411
+
+volumes:
+  worldseed-data:
+  go-cache:
