@@ -12,4 +12,4 @@ worldseedd --data-dir ./testdata start --universe <id-from-create>
 worldseed connect
 ```
 
-The dashboard exposes universe age, entropy, archive integrity, active civilisations, recent timeline events, and the `preserve_archive` intervention.
+The dashboard exposes universe age, entropy, archive integrity, active civilisations, recent checksummed timeline events, and the `preserve_archive` intervention.

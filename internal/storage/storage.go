@@ -2,8 +2,10 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,8 @@ import (
 	"github.com/gmcnicol/worldseed/internal/timeline"
 	_ "modernc.org/sqlite"
 )
+
+const zeroEventChecksum = "0000000000000000000000000000000000000000000000000000000000000000"
 
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
@@ -114,7 +118,121 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("apply migration %s: %w", entry.Name(), err)
 		}
 	}
-	return nil
+	return s.ensureEventLedger(ctx)
+}
+
+func (s *Store) ensureEventLedger(ctx context.Context) error {
+	if err := s.ensureEventColumn(ctx, "previous_checksum", "TEXT NOT NULL DEFAULT '"+zeroEventChecksum+"'"); err != nil {
+		return err
+	}
+	if err := s.ensureEventColumn(ctx, "checksum", "TEXT NOT NULL DEFAULT '"+zeroEventChecksum+"'"); err != nil {
+		return err
+	}
+	needsBackfill, err := s.eventChecksumBackfillNeeded(ctx)
+	if err != nil {
+		return err
+	}
+	if needsBackfill {
+		if _, err := s.db.ExecContext(ctx, `DROP TRIGGER IF EXISTS events_immutable_update`); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `DROP TRIGGER IF EXISTS events_immutable_delete`); err != nil {
+			return err
+		}
+		if err := s.backfillEventChecksums(ctx); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER IF NOT EXISTS events_immutable_update
+BEFORE UPDATE ON events
+BEGIN
+	SELECT RAISE(ABORT, 'timeline events are immutable');
+END`); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `CREATE TRIGGER IF NOT EXISTS events_immutable_delete
+BEFORE DELETE ON events
+BEGIN
+	SELECT RAISE(ABORT, 'timeline events are immutable');
+END`)
+	return err
+}
+
+func (s *Store) eventChecksumBackfillNeeded(ctx context.Context) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE checksum = ? OR checksum = ''`, zeroEventChecksum).Scan(&count)
+	return count > 0, err
+}
+
+func (s *Store) ensureEventColumn(ctx context.Context, name, definition string) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(events)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var columnName string
+		var columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var primaryKey int
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if columnName == name {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE events ADD COLUMN %s %s", name, definition))
+	return err
+}
+
+func (s *Store) backfillEventChecksums(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+
+	rows, err := tx.QueryContext(ctx, `SELECT id, universe_id, kind, COALESCE(entity_id, ''), valid_time, recorded_at, payload, summary, previous_checksum, checksum FROM events ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var events []timeline.Event
+	for rows.Next() {
+		event, err := scanEvent(rows)
+		if err != nil {
+			return err
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	previousByUniverse := map[string]string{}
+	for _, event := range events {
+		previous := previousByUniverse[event.UniverseID]
+		if previous == "" {
+			previous = zeroEventChecksum
+		}
+		event.PreviousChecksum = previous
+		event.Checksum = eventChecksum(event)
+		if _, err := tx.ExecContext(ctx, `UPDATE events SET previous_checksum = ?, checksum = ? WHERE id = ?`, event.PreviousChecksum, event.Checksum, event.ID); err != nil {
+			return err
+		}
+		previousByUniverse[event.UniverseID] = event.Checksum
+	}
+	return tx.Commit()
 }
 
 func (s *Store) CreateUniverse(ctx context.Context, u Universe, firstEntity Entity, event timeline.Event) error {
@@ -132,7 +250,7 @@ func (s *Store) CreateUniverse(ctx context.Context, u Universe, firstEntity Enti
 	if err := insertEntity(ctx, tx, firstEntity); err != nil {
 		return err
 	}
-	if err := insertEvent(ctx, tx, event); err != nil {
+	if _, err := insertEvent(ctx, tx, event); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -155,10 +273,7 @@ func (s *Store) AppendEvent(ctx context.Context, event timeline.Event) (int64, e
 		return 0, err
 	}
 	defer rollback(tx)
-	if err := insertEvent(ctx, tx, event); err != nil {
-		return 0, err
-	}
-	id, err := lastInsertID(ctx, tx)
+	id, err := insertEvent(ctx, tx, event)
 	if err != nil {
 		return 0, err
 	}
@@ -182,7 +297,7 @@ func (s *Store) ApplyTick(ctx context.Context, u Universe, entities []Entity, ev
 		}
 	}
 	for _, event := range events {
-		if err := insertEvent(ctx, tx, event); err != nil {
+		if _, err := insertEvent(ctx, tx, event); err != nil {
 			return err
 		}
 	}
@@ -237,7 +352,7 @@ func (s *Store) AllCivilisations(ctx context.Context, universeID string) ([]Enti
 }
 
 func (s *Store) RecentEvents(ctx context.Context, universeID string, limit int) ([]timeline.Event, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, universe_id, kind, COALESCE(entity_id, ''), valid_time, recorded_at, payload, summary FROM events WHERE universe_id = ? ORDER BY valid_time DESC, id DESC LIMIT ?`, universeID, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, universe_id, kind, COALESCE(entity_id, ''), valid_time, recorded_at, payload, summary, previous_checksum, checksum FROM events WHERE universe_id = ? ORDER BY valid_time DESC, id DESC LIMIT ?`, universeID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -281,7 +396,7 @@ func (s *Store) RequestIntervention(ctx context.Context, universeID, kind string
 	if err != nil {
 		return err
 	}
-	if err := insertEvent(ctx, tx, event); err != nil {
+	if _, err := insertEvent(ctx, tx, event); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -335,6 +450,42 @@ func (s *Store) ClientKeys(ctx context.Context, universeID string) ([]ClientKey,
 	return keys, rows.Err()
 }
 
+func (s *Store) EventChain(ctx context.Context, universeID string) ([]timeline.Event, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, universe_id, kind, COALESCE(entity_id, ''), valid_time, recorded_at, payload, summary, previous_checksum, checksum FROM events WHERE universe_id = ? ORDER BY id`, universeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var events []timeline.Event
+	for rows.Next() {
+		event, err := scanEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func (s *Store) VerifyEventChain(ctx context.Context, universeID string) error {
+	events, err := s.EventChain(ctx, universeID)
+	if err != nil {
+		return err
+	}
+	previous := zeroEventChecksum
+	for _, event := range events {
+		if event.PreviousChecksum != previous {
+			return fmt.Errorf("event %d previous checksum mismatch", event.ID)
+		}
+		if checksum := eventChecksum(event); event.Checksum != checksum {
+			return fmt.Errorf("event %d checksum mismatch", event.ID)
+		}
+		previous = event.Checksum
+	}
+	return nil
+}
+
 func EncodeCivilisationState(state CivilisationState) string {
 	body, _ := json.Marshal(state)
 	return string(body)
@@ -383,7 +534,7 @@ func scanEntity(row interface{ Scan(...any) error }) (Entity, error) {
 func scanEvent(row interface{ Scan(...any) error }) (timeline.Event, error) {
 	var event timeline.Event
 	var recorded string
-	err := row.Scan(&event.ID, &event.UniverseID, &event.Kind, &event.EntityID, &event.ValidTime, &recorded, &event.Payload, &event.Summary)
+	err := row.Scan(&event.ID, &event.UniverseID, &event.Kind, &event.EntityID, &event.ValidTime, &recorded, &event.Payload, &event.Summary, &event.PreviousChecksum, &event.Checksum)
 	if err != nil {
 		return timeline.Event{}, err
 	}
@@ -444,20 +595,71 @@ ON CONFLICT(id) DO UPDATE SET state = excluded.state, valid_from = excluded.vali
 	return err
 }
 
-func insertEvent(ctx context.Context, tx *sql.Tx, event timeline.Event) error {
+func insertEvent(ctx context.Context, tx *sql.Tx, event timeline.Event) (int64, error) {
 	var entityID any
 	if event.EntityID != "" {
 		entityID = event.EntityID
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO events (universe_id, kind, entity_id, valid_time, recorded_at, payload, summary) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		event.UniverseID, event.Kind, entityID, event.ValidTime, event.RecordedAt.UTC().Format(time.RFC3339Nano), event.Payload, event.Summary)
-	return err
+	id, err := nextEventID(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	previousChecksum, err := previousEventChecksum(ctx, tx, event.UniverseID)
+	if err != nil {
+		return 0, err
+	}
+	event.ID = id
+	event.PreviousChecksum = previousChecksum
+	event.Checksum = eventChecksum(event)
+	_, err = tx.ExecContext(ctx, `INSERT INTO events (id, universe_id, kind, entity_id, valid_time, recorded_at, payload, summary, previous_checksum, checksum) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.ID, event.UniverseID, event.Kind, entityID, event.ValidTime, event.RecordedAt.UTC().Format(time.RFC3339Nano), event.Payload, event.Summary, event.PreviousChecksum, event.Checksum)
+	return id, err
 }
 
-func lastInsertID(ctx context.Context, tx *sql.Tx) (int64, error) {
+func nextEventID(ctx context.Context, tx *sql.Tx) (int64, error) {
 	var id int64
-	err := tx.QueryRowContext(ctx, `SELECT last_insert_rowid()`).Scan(&id)
+	err := tx.QueryRowContext(ctx, `SELECT MAX(value) + 1 FROM (
+SELECT COALESCE(MAX(id), 0) AS value FROM events
+UNION ALL
+SELECT COALESCE(seq, 0) AS value FROM sqlite_sequence WHERE name = 'events'
+)`).Scan(&id)
 	return id, err
+}
+
+func previousEventChecksum(ctx context.Context, tx *sql.Tx, universeID string) (string, error) {
+	var checksum string
+	err := tx.QueryRowContext(ctx, `SELECT checksum FROM events WHERE universe_id = ? ORDER BY id DESC LIMIT 1`, universeID).Scan(&checksum)
+	if errors.Is(err, sql.ErrNoRows) {
+		return zeroEventChecksum, nil
+	}
+	return checksum, err
+}
+
+func eventChecksum(event timeline.Event) string {
+	input := struct {
+		ID               int64  `json:"id"`
+		UniverseID       string `json:"universe_id"`
+		Kind             string `json:"kind"`
+		EntityID         string `json:"entity_id"`
+		ValidTime        int64  `json:"valid_time"`
+		RecordedAt       string `json:"recorded_at"`
+		Payload          string `json:"payload"`
+		Summary          string `json:"summary"`
+		PreviousChecksum string `json:"previous_checksum"`
+	}{
+		ID:               event.ID,
+		UniverseID:       event.UniverseID,
+		Kind:             event.Kind,
+		EntityID:         event.EntityID,
+		ValidTime:        event.ValidTime,
+		RecordedAt:       event.RecordedAt.UTC().Format(time.RFC3339Nano),
+		Payload:          event.Payload,
+		Summary:          event.Summary,
+		PreviousChecksum: event.PreviousChecksum,
+	}
+	body, _ := json.Marshal(input)
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
 }
 
 func rollback(tx *sql.Tx) {
